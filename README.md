@@ -122,23 +122,27 @@ API Response Examples
 To avoid Instagram blocking the scraper, several anti-detection measures are implemented:
 
 ### 1. User-Agent Rotation
+
 - Each session uses a different User-Agent from a pool of 16 realistic browsers
 - Includes Chrome, Firefox, Safari, and Edge on Windows, macOS, and Linux
 - Sec-Ch-Ua headers automatically match the selected User-Agent
 
 ### 2. Header Randomization
+
 - Accept-Language varies across 8 different locale options
 - Accept-Encoding order is randomized
 - Header order is shuffled to avoid fingerprinting
 - All vary per request for maximum variance
 
 ### 3. Session Refresh
+
 - Sessions automatically refresh after 50 requests OR 30 minutes
 - Each refresh generates a fresh User-Agent and headers
 - CSRF tokens are refreshed automatically
 - Prevents detection based on session age
 
 ### 4. Request Timing
+
 - Random delays (1-3 seconds) between requests
 - Mimics human browsing behavior
 - Configurable via MIN_DELAY and MAX_DELAY

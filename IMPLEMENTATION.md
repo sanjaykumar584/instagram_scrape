@@ -311,6 +311,7 @@ USER_AGENTS = [
 ```
 
 **Implementation:**
+
 - On session init, `generate_base_headers()` calls `get_random_user_agent()`
 - Returns different User-Agent each time session is created
 - Browser metadata (name, version, platform) stored with User-Agent
@@ -328,6 +329,7 @@ headers['Accept-Encoding'] = random.choice(ACCEPT_ENCODINGS)  # Different order
 ```
 
 **Why This Helps:**
+
 - Instagram tracks User-Agent + header combinations
 - Varying headers = looks like different browsers
 - Random header order prevents fingerprinting via order patterns
@@ -357,6 +359,7 @@ def _refresh_if_needed(self):
 ```
 
 **Behavior:**
+
 1. Session starts with new User-Agent and headers
 2. After 50 requests OR 30 minutes, session refreshes
 3. Refresh happens automatically before next request
@@ -381,6 +384,7 @@ elif ua_data['browser'] == 'Chrome':
 ```
 
 This prevents impossible combinations like:
+
 - Safari on Windows (doesn't exist)
 - Firefox with Edge User-Agent
 - Chrome with Safari headers
@@ -397,6 +401,7 @@ self.last_refresh_time = time.time()             # Updated on refresh
 ```
 
 **Logged at refresh:**
+
 ```
 INFO: Session 1768231961737 initialized with fresh fingerprint
 INFO: Proactively refreshing session (requests: 50, age: 1800s)
