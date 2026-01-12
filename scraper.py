@@ -237,16 +237,47 @@ class InstagramScraper:
         edges = connection.get('edges', [])
         for edge in edges[:limit]:
             node = edge.get('node', {})
-            posts.append({
+            is_video = node.get('is_video', False) or node.get('media_type') == 2
+            
+            post = {
                 'shortcode': node.get('code') or node.get('shortcode'),
                 'caption': self._get_caption(node),
                 'like_count': node.get('like_count') or node.get('edge_liked_by', {}).get('count', 0),
                 'comment_count': node.get('comment_count') or node.get('edge_media_to_comment', {}).get('count', 0),
                 'timestamp': node.get('taken_at') or node.get('taken_at_timestamp'),
-                'media_url': self._pick_media_url(node),
-                'is_video': node.get('is_video', False)
-            })
+                'thumbnail_url': node.get('display_url') or node.get('thumbnail_url'),
+                'is_video': is_video,
+            }
+            
+            # For videos/reels, add video URL separately
+            if is_video:
+                post['video_url'] = self._get_video_url(node)
+                post['media_url'] = post['video_url']  # Primary URL is video for reels
+            else:
+                post['media_url'] = post['thumbnail_url']  # For images, media_url is same as thumbnail
+                post['video_url'] = None
+            
+            posts.append(post)
         return posts
+
+    def _get_video_url(self, node: Dict[str, Any]) -> Optional[str]:
+        """Extract video URL from node for reels/videos."""
+        # Try direct video_url field
+        if node.get('video_url'):
+            return node.get('video_url')
+        
+        # Try video_versions array (usually has multiple qualities)
+        videos = node.get('video_versions', [])
+        if videos:
+            # Return highest quality (first in array)
+            return videos[0].get('url')
+        
+        # Try dash_info for adaptive streaming
+        if node.get('video_dash_manifest'):
+            # Return dash manifest URL if available
+            return node.get('video_dash_manifest')
+        
+        return None
 
     def _pick_media_url(self, node: Dict[str, Any]) -> Optional[str]:
         """Choose a display URL from node candidates."""

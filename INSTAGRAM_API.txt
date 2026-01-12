@@ -1,4 +1,4 @@
-#curl 'https://www.instagram.com/graphql/query' \
+curl 'https://www.instagram.com/graphql/query' \
   -H 'accept: */*' \
   -H 'accept-language: en-GB,en;q=0.6' \
   -H 'content-type: application/x-www-form-urlencoded' \
