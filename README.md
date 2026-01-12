@@ -1,12 +1,11 @@
 # Instagram Scraper API
 
-A lightweight FastAPI service that uses Instagram's GraphQL API to search users and fetch profiles. No database required, no login needed, all data fetched in real-time with in-memory caching.
+A lightweight FastAPI service that uses Instagram's GraphQL API to search users and fetch profiles. No database required, no login needed, all data fetched in real-time.
 
 ## Features
 
 - **Search Users**: Find users by username/name using Instagram's official GraphQL API
 - **Fetch Profiles**: Get detailed profile information including bio, follower counts, and posts
-- **In-Memory Cache**: 1-hour TTL cache to reduce API calls and improve response times
 - **Rate Limiting Protection**: Random delays (1-3s) between requests to avoid blocks
 - **No Authentication**: Works without Instagram login (public data only)
 
@@ -32,7 +31,6 @@ pip install -r requirements.txt
 Copy `.env.example` to `.env` and adjust settings:
 
 ```
-CACHE_TTL=3600
 REQUEST_TIMEOUT=10
 MIN_DELAY=1
 MAX_DELAY=3
@@ -144,7 +142,6 @@ This project is for educational/demo purposes only. Respect Instagram's Terms of
 - Random delays (1-3 seconds) between requests mimic human behavior
 - Instagram may block aggressive scraping patterns
 - Respect rate limits: don't make more than 10-20 requests/minute
-- Use caching effectively to minimize API calls
 - Consider implementing exponential backoff for production use
 
 ## Security

@@ -2,7 +2,6 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from scraper import InstagramScraper
-from cache import SimpleCache
 import time
 import requests
 import uuid
@@ -12,7 +11,6 @@ logger = get_logger("api")
 
 app = FastAPI(title="Instagram Scraper API")
 scraper = InstagramScraper()
-cache = SimpleCache(ttl=None)  # TTL from env or default
 start_time = time.time()
 
 class ScraperError(Exception):
@@ -55,12 +53,6 @@ async def search_users(
                 status_code=429
             )
         
-        cache_key = f"search:{q}:{limit}"
-        cached = cache.get(cache_key)
-        if cached:
-            logger.debug(f"[{request_id}] Cache hit")
-            return JSONResponse(content=cached)
-
         results = scraper.search_users(q, limit)
         if results is None:
             raise ScraperError(
@@ -77,7 +69,6 @@ async def search_users(
             "results": results,
             "count": len(results)
         }
-        cache.set(cache_key, response)
         logger.info(f"[{request_id}] SEARCH completed with {len(results)} results")
         return JSONResponse(content=response)
         
@@ -115,12 +106,6 @@ async def get_profile(
                 status_code=429
             )
         
-        cache_key = f"profile:{username}:{posts}"
-        cached = cache.get(cache_key)
-        if cached:
-            logger.debug(f"[{request_id}] Cache hit")
-            return JSONResponse(content=cached)
-
         profile_data = scraper.get_profile(username, include_posts=posts > 0, post_limit=posts)
         if not profile_data:
             logger.warning(f"[{request_id}] Profile not found: {username}")
@@ -135,7 +120,6 @@ async def get_profile(
             "profile": profile_data["profile"],
             "posts": profile_data.get("posts", [])
         }
-        cache.set(cache_key, response)
         logger.info(f"[{request_id}] PROFILE {username} completed with {len(response.get('posts', []))} posts")
         return JSONResponse(content=response)
         

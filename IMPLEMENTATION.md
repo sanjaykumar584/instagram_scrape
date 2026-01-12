@@ -6,11 +6,10 @@
 2. [GraphQL API Integration](#graphql-api-integration)
 3. [Request Flow](#request-flow)
 4. [Authentication & CSRF Tokens](#authentication--csrf-tokens)
-5. [Caching Strategy](#caching-strategy)
-6. [HTML Parsing for Profiles](#html-parsing-for-profiles)
-7. [Error Handling & Rate Limiting](#error-handling--rate-limiting)
-8. [Code Structure](#code-structure)
-9. [Production Hardening Plan](#production-hardening-plan)
+5. [HTML Parsing for Profiles](#html-parsing-for-profiles)
+6. [Error Handling & Rate Limiting](#error-handling--rate-limiting)
+7. [Code Structure](#code-structure)
+8. [Production Hardening Plan](#production-hardening-plan)
 
 ---
 
@@ -31,7 +30,6 @@ HTTP Session + Instagram APIs
 1. **main.py** - FastAPI application
 
    - Defines REST endpoints (`/search`, `/profile`, `/health`)
-   - Handles caching logic
    - Formats responses
 
 2. **scraper.py** - Core scraper logic
@@ -39,10 +37,6 @@ HTTP Session + Instagram APIs
    - Manages HTTP sessions
    - Implements GraphQL queries
    - Parses HTML responses
-
-3. **cache.py** - In-memory cache
-   - TTL-based expiration
-   - Key-value storage
 
 ---
 
@@ -177,11 +171,8 @@ for item in user_items:
 1. User sends: GET /search?q=cristiano&limit=5
    ↓
 2. FastAPI main.py receives request
-   ├─ Generate cache key: "search:cristiano:5"
-   ├─ Check cache.get("search:cristiano:5")
-   └─ If cached: return cached result
-
-3. Cache miss, so call scraper.search_users("cristiano", 5)
+   ↓
+3. Call scraper.search_users("cristiano", 5)
    ├─ Scraper adds random delay (1-3 seconds)
    ├─ Build headers with CSRF token
    ├─ Build GraphQL variables
@@ -197,11 +188,7 @@ for item in user_items:
      "count": 5
    }
 
-5. Cache the result: cache.set("search:cristiano:5", response)
-   ↓
-6. Return response to user
-   ↓
-7. Next request for same query uses cache (no API call for 1 hour)
+5. Return response to user
 ```
 
 ### Complete Flow for `/profile/cristiano`
@@ -210,11 +197,8 @@ for item in user_items:
 1. User sends: GET /profile/cristiano?posts=12
    ↓
 2. FastAPI receives request
-   ├─ Generate cache key: "profile:cristiano:12"
-   ├─ Check cache
-   └─ If cached: return cached result
-
-3. Cache miss, so call scraper.get_profile("cristiano", include_posts=True, post_limit=12)
+   ↓
+3. Call scraper.get_profile("cristiano", include_posts=True, post_limit=12)
    ├─ Add random delay
    ├─ GET https://instagram.com/cristiano/
    ├─ Parse HTML response
@@ -235,9 +219,7 @@ for item in user_items:
      "posts": [...]
    }
 
-5. Cache the result
-   ↓
-6. Return to user
+5. Return to user
 ```
 
 ---
@@ -286,80 +268,6 @@ headers['X-CSRFToken'] = self.csrf_token
 # The session also maintains cookies automatically
 self.session.cookies.set_cookie(cookie)
 ```
-
----
-
-## Caching Strategy
-
-### Cache Implementation (cache.py)
-
-```python
-class SimpleCache:
-    def __init__(self, ttl: int = None):
-        # TTL from env or default 3600 seconds (1 hour)
-        default_ttl = int(os.getenv("CACHE_TTL", "3600") or 3600)
-        self.cache = {}  # Internal dict: key -> (value, expiry_time)
-        self.ttl = ttl if ttl is not None else default_ttl
-
-    def get(self, key: str) -> Optional[Any]:
-        """Get value if not expired"""
-        item = self.cache.get(key)
-        if not item:
-            return None
-        value, expiry = item
-        if time.time() < expiry:
-            return value
-        # Expired, clean up and return None
-        self.cache.pop(key, None)
-        return None
-
-    def set(self, key: str, value: Any):
-        """Store value with expiry time"""
-        expiry = time.time() + self.ttl
-        self.cache[key] = (value, expiry)
-```
-
-### Cache Keys
-
-```python
-# Search requests
-cache_key = f"search:{query}:{limit}"
-# Example: "search:cristiano:10"
-
-# Profile requests
-cache_key = f"profile:{username}:{posts}"
-# Example: "profile:cristiano:12"
-```
-
-### Cache Flow
-
-```
-Request comes in
-    ↓
-Generate cache_key = f"search:{q}:{limit}"
-    ↓
-cached = cache.get(cache_key)
-    ├─ If found and not expired: return cached
-    └─ If not found or expired: continue
-    ↓
-Make API request to Instagram
-    ↓
-Receive response
-    ↓
-Format response dict
-    ↓
-cache.set(cache_key, response_dict)
-    ↓
-Return response
-    ↓
-(Next identical request within 1 hour uses cache - NO API CALL!)
-```
-
-### Benefits
-
-- Reduces API calls to Instagram (avoids rate limiting)
-- Faster response times (memory lookup vs HTTP request)
-- Enables offline-like behavior for recent queries
 
 ---
 
