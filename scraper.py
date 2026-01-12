@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 import os
 from logger_config import get_logger
 from rate_limiter import RateLimitTracker
+from header_generator import generate_base_headers, add_graphql_headers
 
 logger = get_logger("scraper")
 
@@ -27,6 +28,10 @@ IG_APP_ID = os.getenv("IG_APP_ID", "936619743392459")
 ASBD_ID = os.getenv("IG_ASBD_ID", "359341")
 BLOKS_VERSION_ID = os.getenv("IG_BLOKS_VERSION_ID", "41a4871badc8ef00114860033dd42edcd50935d511345a5a37fbaa878479ad3c")
 
+# Session refresh configuration
+SESSION_REFRESH_REQUESTS = int(os.getenv("SESSION_REFRESH_REQUESTS", "50") or 50)
+SESSION_REFRESH_SECONDS = int(os.getenv("SESSION_REFRESH_SECONDS", "1800") or 1800)  # 30 minutes
+
 
 class InstagramScraper:
     def __init__(self):
@@ -38,30 +43,33 @@ class InstagramScraper:
         
         self.base_url = "https://www.instagram.com"
         self.graphql_url = "https://www.instagram.com/graphql/query"
-        self.headers = {
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Accept': '*/*',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin',
-            'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-            'Sec-Ch-Ua-Mobile': '?0',
-            'Sec-Ch-Ua-Platform': '"macOS"',
-        }
+        
+        # Generate dynamic headers instead of hardcoded
+        self.headers = generate_base_headers()
+        
         self.csrf_token = ''
         self.app_id = IG_APP_ID  # Instagram web app ID (override via env)
         self.search_doc_id = SEARCH_DOC_ID  # GraphQL doc ID for search
         self.lsd_token: str = os.getenv("IG_LSD_TOKEN", "")
         self.rate_limiter = RateLimitTracker()
+        
+        # Session refresh tracking
+        self.requests_count = 0
+        self.last_refresh_time = time.time()
+        self.session_id = int(time.time() * 1000)  # Unique session identifier
+        
         self._init_session()
 
     def _init_session(self):
-        """Initialize session and get CSRF token"""
+        """Initialize session and get CSRF token with fresh headers"""
         try:
-            logger.debug("Initializing session and fetching CSRF token")
+            # Generate fresh headers for this session
+            self.headers = generate_base_headers()
+            self.session_id = int(time.time() * 1000)
+            self.last_refresh_time = time.time()
+            self.requests_count = 0
+            
+            logger.info(f"Initializing session {self.session_id} with fresh fingerprint")
             response = self.session.get(self.base_url, headers=self.headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
             response.raise_for_status()
             
@@ -88,7 +96,7 @@ class InstagramScraper:
             for cookie in response.cookies:
                 self.session.cookies.set_cookie(cookie)
             
-            logger.info("Session initialized successfully")
+            logger.info(f"Session {self.session_id} initialized successfully")
             self.rate_limiter.record_success()
         except requests.exceptions.RequestException as e:
             logger.error(f"Failed to initialize session: {e}")
@@ -100,35 +108,57 @@ class InstagramScraper:
         delay = random.uniform(MIN_DELAY, MAX_DELAY)
         logger.debug(f"Rate limiting delay: {delay:.2f}s")
         time.sleep(delay)
+    
+    def _should_refresh_session(self) -> bool:
+        """Check if session should be refreshed based on age and request count"""
+        time_since_refresh = time.time() - self.last_refresh_time
+        
+        if self.requests_count >= SESSION_REFRESH_REQUESTS:
+            logger.info(f"Session refresh needed: request count {self.requests_count} >= {SESSION_REFRESH_REQUESTS}")
+            return True
+        
+        if time_since_refresh >= SESSION_REFRESH_SECONDS:
+            logger.info(f"Session refresh needed: time {time_since_refresh:.0f}s >= {SESSION_REFRESH_SECONDS}s")
+            return True
+        
+        return False
+    
+    def _refresh_if_needed(self):
+        """Refresh session if thresholds are exceeded"""
+        if self._should_refresh_session():
+            logger.info(f"Proactively refreshing session (requests: {self.requests_count}, age: {time.time() - self.last_refresh_time:.0f}s)")
+            self._init_session()
 
     def _build_graphql_headers(self, friendly_name: Optional[str] = None, root_field: Optional[str] = None) -> Dict[str, str]:
-        """Prepare headers for GraphQL calls."""
-        headers = self.headers.copy()
-        headers.update({
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': self.base_url,
-            'Referer': f'{self.base_url}/',
-            'X-IG-App-ID': self.app_id,
-            'X-ASBD-ID': ASBD_ID,
-            'X-Bloks-Version-Id': BLOKS_VERSION_ID,
-        })
-        if self.csrf_token:
-            headers['X-CSRFToken'] = self.csrf_token
-        if self.lsd_token:
-            headers['X-FB-LSD'] = self.lsd_token
-        if friendly_name:
-            headers['X-FB-Friendly-Name'] = friendly_name
-        if root_field:
-            headers['X-IG-Root-Field-Name'] = root_field
+        """Prepare headers for GraphQL calls using dynamic header generation."""
+        headers = add_graphql_headers(
+            base_headers=self.headers,
+            csrf_token=self.csrf_token,
+            app_id=self.app_id,
+            asbd_id=ASBD_ID,
+            bloks_version_id=BLOKS_VERSION_ID,
+            lsd_token=self.lsd_token,
+            friendly_name=friendly_name or "",
+            root_field_name=root_field or ""
+        )
+        # Add Origin and Referer which are not in header_generator
+        headers['Origin'] = self.base_url
+        headers['Referer'] = f'{self.base_url}/'
         return headers
 
     def _post_graphql(self, doc_id: str, variables: Dict[str, Any], friendly_name: Optional[str] = None, root_field: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Execute a GraphQL POST with shared headers and variables and retry logic"""
+        # Check if session needs refresh before making request
+        self._refresh_if_needed()
+        
         # Check if rate limited
         if self.rate_limiter.is_blocked():
             wait = self.rate_limiter.get_wait_time()
             logger.warning(f"Rate limited, request blocked for {wait:.1f}s more")
             return None
+        
+        # Increment request counter
+        self.requests_count += 1
         
         for attempt in range(MAX_RETRIES):
             try:
@@ -236,6 +266,10 @@ class InstagramScraper:
 
     def _fetch_profile_api(self, username: str) -> Optional[Dict[str, Any]]:
         """Fetch profile using Instagram's web profile info endpoint (no doc_id required)."""
+        # Check if session needs refresh before making request
+        self._refresh_if_needed()
+        self.requests_count += 1
+        
         try:
             url = f"{self.base_url}/api/v1/users/web_profile_info/?username={username}"
             headers = self._build_graphql_headers()
@@ -390,19 +424,17 @@ class InstagramScraper:
 
     def search_users(self, query: str, limit: int = 20) -> List[Dict]:
         """Search for Instagram users using GraphQL API"""
+        # Check if session needs refresh before making request
+        self._refresh_if_needed()
+        self.requests_count += 1
+        
         try:
             self._random_delay()
 
-            # Use Instagram's GraphQL API for search
-            headers = self.headers.copy()
-            headers['Content-Type'] = 'application/x-www-form-urlencoded'
-            headers['Origin'] = self.base_url
-            headers['Referer'] = f'{self.base_url}/'
-            
-            if self.csrf_token:
-                headers['X-CSRFToken'] = self.csrf_token
-            headers['X-IG-App-ID'] = self.app_id
-            headers['X-FB-Friendly-Name'] = 'PolarisSearchBoxRefetchableQuery'
+            # Build GraphQL headers
+            headers = self._build_graphql_headers(
+                friendly_name='PolarisSearchBoxRefetchableQuery'
+            )
             headers['X-Requested-With'] = 'XMLHttpRequest'
 
             # Build the GraphQL variables
@@ -454,7 +486,8 @@ class InstagramScraper:
 
             return []
 
-        except Exception:
+        except Exception as e:
+            logger.error(f"Search error: {e}", exc_info=True)
             return []
 
     def get_profile(self, username: str, include_posts: bool = False, post_limit: int = 12) -> Optional[Dict]:
@@ -572,10 +605,10 @@ class InstagramScraper:
             if include_posts and user_data:
                 posts = self._extract_posts(user_data, post_limit)
                 result['posts'] = posts
-
             return result
 
-        except Exception:
+        except Exception as e:
+            logger.error(f"Profile fetch error for {username}: {e}", exc_info=True)
             return None
     
     def _extract_user_from_nested(self, data: Dict) -> Optional[Dict]:
