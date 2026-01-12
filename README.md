@@ -6,7 +6,9 @@ A lightweight FastAPI service that uses Instagram's GraphQL API to search users 
 
 - **Search Users**: Find users by username/name using Instagram's official GraphQL API
 - **Fetch Profiles**: Get detailed profile information including bio, follower counts, and posts
-- **Rate Limiting Protection**: Random delays (1-3s) between requests to avoid blocks
+- **Smart Rate Limiting**: Random delays (1-3s) between requests to avoid blocks
+- **Anti-Detection**: User-Agent rotation, header randomization, session refresh to avoid Instagram blocks
+- **Reliable**: Automatic session refresh every 50 requests or 30 minutes with fresh fingerprints
 - **No Authentication**: Works without Instagram login (public data only)
 
 > **Note**: Accessing Instagram programmatically may violate their Terms of Service. Use responsibly for educational purposes only, with proper consent, and comply with all applicable laws and platform policies.
@@ -34,6 +36,8 @@ Copy `.env.example` to `.env` and adjust settings:
 REQUEST_TIMEOUT=10
 MIN_DELAY=1
 MAX_DELAY=3
+SESSION_REFRESH_REQUESTS=50      # Refresh after N requests (default: 50)
+SESSION_REFRESH_SECONDS=1800     # Refresh after N seconds (default: 30 min)
 ```
 
 ### 4) Run the API server (Python)
@@ -113,6 +117,32 @@ API Response Examples
 }
 ```
 
+## Anti-Detection Features
+
+To avoid Instagram blocking the scraper, several anti-detection measures are implemented:
+
+### 1. User-Agent Rotation
+- Each session uses a different User-Agent from a pool of 16 realistic browsers
+- Includes Chrome, Firefox, Safari, and Edge on Windows, macOS, and Linux
+- Sec-Ch-Ua headers automatically match the selected User-Agent
+
+### 2. Header Randomization
+- Accept-Language varies across 8 different locale options
+- Accept-Encoding order is randomized
+- Header order is shuffled to avoid fingerprinting
+- All vary per request for maximum variance
+
+### 3. Session Refresh
+- Sessions automatically refresh after 50 requests OR 30 minutes
+- Each refresh generates a fresh User-Agent and headers
+- CSRF tokens are refreshed automatically
+- Prevents detection based on session age
+
+### 4. Request Timing
+- Random delays (1-3 seconds) between requests
+- Mimics human browsing behavior
+- Configurable via MIN_DELAY and MAX_DELAY
+
 ## Troubleshooting
 
 **Empty search results**
@@ -141,8 +171,10 @@ This project is for educational/demo purposes only. Respect Instagram's Terms of
 
 - Random delays (1-3 seconds) between requests mimic human behavior
 - Instagram may block aggressive scraping patterns
-- Respect rate limits: don't make more than 10-20 requests/minute
-- Consider implementing exponential backoff for production use
+- Respect rate limits: don't make more than 50-100 requests/minute
+- The scraper automatically rotates sessions every 50 requests
+- Consider spreading requests over time for long-term reliability
+- Monitor logs for rate limit warnings (HTTP 429)
 
 ## Security
 

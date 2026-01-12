@@ -6,10 +6,11 @@
 2. [GraphQL API Integration](#graphql-api-integration)
 3. [Request Flow](#request-flow)
 4. [Authentication & CSRF Tokens](#authentication--csrf-tokens)
-5. [HTML Parsing for Profiles](#html-parsing-for-profiles)
-6. [Error Handling & Rate Limiting](#error-handling--rate-limiting)
-7. [Code Structure](#code-structure)
-8. [Production Hardening Plan](#production-hardening-plan)
+5. [Anti-Detection & Session Refresh](#anti-detection--session-refresh)
+6. [HTML Parsing for Profiles](#html-parsing-for-profiles)
+7. [Error Handling & Rate Limiting](#error-handling--rate-limiting)
+8. [Code Structure](#code-structure)
+9. [Production Hardening Plan](#production-hardening-plan)
 
 ---
 
@@ -31,12 +32,35 @@ HTTP Session + Instagram APIs
 
    - Defines REST endpoints (`/search`, `/profile`, `/health`)
    - Formats responses
+   - Handles request validation
 
 2. **scraper.py** - Core scraper logic
 
-   - Manages HTTP sessions
+   - Manages HTTP sessions with dynamic headers
    - Implements GraphQL queries
    - Parses HTML responses
+   - Tracks and refreshes sessions
+
+3. **user_agent_pool.py** - User-Agent rotation
+
+   - Pool of 16 realistic User-Agents (Chrome, Firefox, Safari, Edge)
+   - Covers Windows, macOS, and Linux platforms
+   - Generates matching Sec-Ch-Ua headers
+
+4. **header_generator.py** - Dynamic header generation
+
+   - Randomizes Accept-Language, Accept-Encoding
+   - Shuffles header order
+   - Coordinates headers with selected User-Agent
+   - Generates GraphQL-specific headers
+
+5. **rate_limiter.py** - Rate limiting and circuit breaker
+
+   - Tracks rate limit hits
+   - Implements exponential backoff
+   - Circuit breaker pattern for blocking
+
+6. **logger_config.py** - Logging configuration
 
 ---
 
@@ -271,6 +295,115 @@ self.session.cookies.set_cookie(cookie)
 
 ---
 
+## Anti-Detection & Session Refresh
+
+### User-Agent Rotation
+
+Each session gets a random User-Agent from a pool of 16 realistic browsers:
+
+```python
+# In user_agent_pool.py
+USER_AGENTS = [
+    {"ua": "Mozilla/5.0...", "browser": "Chrome", "version": "131", "platform": "Windows", ...},
+    {"ua": "Mozilla/5.0...", "browser": "Firefox", "version": "122", "platform": "macOS", ...},
+    # ... 14 more realistic User-Agents
+]
+```
+
+**Implementation:**
+- On session init, `generate_base_headers()` calls `get_random_user_agent()`
+- Returns different User-Agent each time session is created
+- Browser metadata (name, version, platform) stored with User-Agent
+
+### Header Randomization
+
+Headers vary per request to avoid fingerprinting:
+
+```python
+# In header_generator.py
+headers['User-Agent'] = random_ua  # Different each session
+headers['Accept-Language'] = random.choice(ACCEPT_LANGUAGES)  # 8 options
+headers['Accept-Encoding'] = random.choice(ACCEPT_ENCODINGS)  # Different order
+# Headers then shuffled: dict items randomized
+```
+
+**Why This Helps:**
+- Instagram tracks User-Agent + header combinations
+- Varying headers = looks like different browsers
+- Random header order prevents fingerprinting via order patterns
+- Different locale/encoding per request = more realistic
+
+### Session Refresh Logic
+
+Sessions are proactively refreshed based on age and request count:
+
+```python
+# In scraper.py
+SESSION_REFRESH_REQUESTS = 50      # Default: refresh every 50 requests
+SESSION_REFRESH_SECONDS = 1800     # Default: refresh every 30 minutes
+
+def _should_refresh_session(self) -> bool:
+    """Check if session should be refreshed"""
+    if self.requests_count >= SESSION_REFRESH_REQUESTS:
+        return True
+    if time.time() - self.last_refresh_time >= SESSION_REFRESH_SECONDS:
+        return True
+    return False
+
+def _refresh_if_needed(self):
+    """Proactively refresh session"""
+    if self._should_refresh_session():
+        self._init_session()  # Generates new headers, User-Agent, CSRF token
+```
+
+**Behavior:**
+1. Session starts with new User-Agent and headers
+2. After 50 requests OR 30 minutes, session refreshes
+3. Refresh happens automatically before next request
+4. New session gets different User-Agent, headers, CSRF token
+5. Prevents detection based on session duration
+
+### Request Fingerprint Variation
+
+All fingerprinting elements coordinate:
+
+```python
+# User-Agent determines platform
+ua_data = get_random_user_agent()  # e.g., Firefox on Linux
+
+# Sec-Ch-Ua headers match platform
+if ua_data['browser'] == 'Firefox':
+    # Firefox doesn't send Sec-Ch-Ua headers (accurate)
+    pass
+elif ua_data['browser'] == 'Chrome':
+    headers['Sec-Ch-Ua'] = f'"Google Chrome";v="{version}"'
+    headers['Sec-Ch-Ua-Platform'] = f'"{platform}"'
+```
+
+This prevents impossible combinations like:
+- Safari on Windows (doesn't exist)
+- Firefox with Edge User-Agent
+- Chrome with Safari headers
+
+### Session Tracking
+
+Each session has metadata for monitoring:
+
+```python
+# In scraper.py __init__
+self.session_id = int(time.time() * 1000)        # Unique ID
+self.requests_count = 0                          # Incremented per request
+self.last_refresh_time = time.time()             # Updated on refresh
+```
+
+**Logged at refresh:**
+```
+INFO: Session 1768231961737 initialized with fresh fingerprint
+INFO: Proactively refreshing session (requests: 50, age: 1800s)
+```
+
+---
+
 ## HTML Parsing for Profiles
 
 ### Why HTML Parsing?
@@ -494,27 +627,45 @@ async def get_profile(username: str, posts: int = Query(0, ge=0, le=50)):
 
 ```
 instgram-scrape/
-├── main.py              # FastAPI server + endpoints
-├── scraper.py           # Core scraping logic
-├── cache.py             # In-memory cache
-├── requirements.txt     # Dependencies
-├── .env.example         # Environment variables template
-├── .env                 # Actual env variables (git-ignored)
-├── README.md            # User guide
-├── IMPLEMENTATION.md    # This file
-└── app/                 # Old folder (deprecated)
-    └── data/            # Cache data storage
+├── main.py                  # FastAPI server + endpoints
+├── scraper.py               # Core scraping logic + session management
+├── user_agent_pool.py       # User-Agent rotation pool
+├── header_generator.py      # Dynamic header generation
+├── rate_limiter.py          # Rate limiting + circuit breaker
+├── logger_config.py         # Logging setup
+├── requirements.txt         # Dependencies
+├── .env.example             # Environment variables template
+├── .env                     # Actual env variables (git-ignored)
+├── README.md                # User guide
+├── IMPLEMENTATION.md        # This file
+└── app/                     # Deprecated folder
+    └── data/                # Cache data storage
 ```
 
 ### Key Classes
 
 **InstagramScraper**
 
-- `__init__()`: Initialize session, get CSRF token
-- `_init_session()`: Setup HTTP session
+- `__init__()`: Initialize session with dynamic headers, get CSRF token
+- `_init_session()`: Setup HTTP session, generate fresh headers
+- `_should_refresh_session()`: Check if session needs refresh
+- `_refresh_if_needed()`: Proactively refresh session
+- `_build_graphql_headers()`: Build GraphQL headers with dynamic values
 - `_random_delay()`: Rate limiting delay
-- `search_users()`: GraphQL search
-- `get_profile()`: HTML profile parsing
+- `search_users()`: GraphQL search with session refresh
+- `get_profile()`: Profile fetching with session refresh
+
+**User-Agent Pool**
+
+- `get_random_user_agent()`: Select random User-Agent with metadata
+- `generate_sec_ch_ua_headers()`: Generate matching Sec-Ch-Ua headers
+- `get_user_agent_with_headers()`: Convenience function for both
+
+**Header Generator**
+
+- `generate_base_headers()`: Create randomized base headers
+- `add_graphql_headers()`: Add GraphQL-specific headers
+- `shuffle_header_order()`: Randomize header ordering
 - `_extract_posts()`: Extract posts from profile data
 - `_extract_shared_data()`: Regex-based data extraction
 - `_extract_user_from_nested()`: Recursive JSON search
