@@ -3,13 +3,21 @@ import re
 import json
 import time
 import random
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from bs4 import BeautifulSoup
 import os
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "10") or 10)
 MIN_DELAY = float(os.getenv("MIN_DELAY", "1") or 1)
 MAX_DELAY = float(os.getenv("MAX_DELAY", "3") or 3)
+
+# GraphQL doc IDs are configurable so they can be rotated without code changes.
+PROFILE_DOC_ID = os.getenv("IG_PROFILE_DOC_ID", "25980296051578533")
+POSTS_DOC_ID = os.getenv("IG_PROFILE_POSTS_DOC_ID", "24835958312750138")
+SEARCH_DOC_ID = os.getenv("IG_SEARCH_DOC_ID", "24146980661639222")
+IG_APP_ID = os.getenv("IG_APP_ID", "936619743392459")
+ASBD_ID = os.getenv("IG_ASBD_ID", "359341")
+BLOKS_VERSION_ID = os.getenv("IG_BLOKS_VERSION_ID", "41a4871badc8ef00114860033dd42edcd50935d511345a5a37fbaa878479ad3c")
 
 
 class InstagramScraper:
@@ -31,8 +39,9 @@ class InstagramScraper:
             'Sec-Ch-Ua-Platform': '"macOS"',
         }
         self.csrf_token = ''
-        self.app_id = '936619743392459'  # Instagram web app ID
-        self.search_doc_id = '24146980661639222'  # GraphQL doc ID for search
+        self.app_id = IG_APP_ID  # Instagram web app ID (override via env)
+        self.search_doc_id = SEARCH_DOC_ID  # GraphQL doc ID for search
+        self.lsd_token: str = os.getenv("IG_LSD_TOKEN", "")
         self._init_session()
 
     def _init_session(self):
@@ -46,6 +55,11 @@ class InstagramScraper:
                 m = re.search(r'"csrf_token":"([^"]+)"', response.text)
                 if m:
                     self.csrf_token = m.group(1)
+            # Try to capture LSD token from the bootstrap payload (used by IG GraphQL)
+            if not self.lsd_token:
+                lsd_match = re.search(r'"LSD",\[\],\{"token":"([^"]+)"\}', response.text)
+                if lsd_match:
+                    self.lsd_token = lsd_match.group(1)
             # Store session ID and other important cookies
             for cookie in response.cookies:
                 self.session.cookies.set_cookie(cookie)
@@ -55,6 +69,198 @@ class InstagramScraper:
     def _random_delay(self):
         """Add random delay to mimic human behavior"""
         time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
+
+    def _build_graphql_headers(self, friendly_name: Optional[str] = None, root_field: Optional[str] = None) -> Dict[str, str]:
+        """Prepare headers for GraphQL calls."""
+        headers = self.headers.copy()
+        headers.update({
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Origin': self.base_url,
+            'Referer': f'{self.base_url}/',
+            'X-IG-App-ID': self.app_id,
+            'X-ASBD-ID': ASBD_ID,
+            'X-Bloks-Version-Id': BLOKS_VERSION_ID,
+        })
+        if self.csrf_token:
+            headers['X-CSRFToken'] = self.csrf_token
+        if self.lsd_token:
+            headers['X-FB-LSD'] = self.lsd_token
+        if friendly_name:
+            headers['X-FB-Friendly-Name'] = friendly_name
+        if root_field:
+            headers['X-IG-Root-Field-Name'] = root_field
+        return headers
+
+    def _post_graphql(self, doc_id: str, variables: Dict[str, Any], friendly_name: Optional[str] = None, root_field: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Execute a GraphQL POST with shared headers and variables."""
+        try:
+            payload = {
+                'doc_id': doc_id,
+                'variables': json.dumps(variables)
+            }
+            headers = self._build_graphql_headers(friendly_name=friendly_name, root_field=root_field)
+            resp = self.session.post(self.graphql_url, headers=headers, data=payload, timeout=REQUEST_TIMEOUT)
+            if resp.status_code != 200:
+                return None
+            return resp.json()
+        except Exception:
+            return None
+
+    def _get_user_id(self, username: str) -> Optional[str]:
+        """Resolve username to user id using Instagram's web profile info endpoint."""
+        try:
+            url = f"{self.base_url}/api/v1/users/web_profile_info/?username={username}"
+            headers = self._build_graphql_headers()
+            headers['Accept'] = 'application/json'
+            resp = self.session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            return str(data.get('data', {}).get('user', {}).get('id') or '') or None
+        except Exception:
+            return None
+
+    def _parse_graphql_profile(self, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Extract profile fields from GraphQL profile response."""
+        user = self._extract_user_from_nested(data)
+        if not user:
+            return None
+        return {
+            'username': user.get('username'),
+            'full_name': user.get('full_name'),
+            'biography': user.get('biography', ''),
+            'follower_count': user.get('follower_count') or user.get('edge_followed_by', {}).get('count', 0),
+            'following_count': user.get('following_count') or user.get('edge_follow', {}).get('count', 0),
+            'post_count': user.get('media_count') or user.get('edge_owner_to_timeline_media', {}).get('count', 0),
+            'is_verified': user.get('is_verified', False),
+            'is_private': user.get('is_private', False),
+            'profile_pic_url': user.get('profile_pic_url_hd') or user.get('hd_profile_pic_url_info', {}).get('url') or user.get('profile_pic_url'),
+            'external_url': user.get('external_url', ''),
+            'category': user.get('category', ''),
+        }
+
+    def _fetch_profile_api(self, username: str) -> Optional[Dict[str, Any]]:
+        """Fetch profile using Instagram's web profile info endpoint (no doc_id required)."""
+        try:
+            url = f"{self.base_url}/api/v1/users/web_profile_info/?username={username}"
+            headers = self._build_graphql_headers()
+            headers['Accept'] = 'application/json'
+            headers['Referer'] = f"{self.base_url}/{username}/"
+            resp = self.session.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            user = data.get('data', {}).get('user', {})
+            if not user:
+                return None
+            profile = {
+                'username': user.get('username'),
+                'full_name': user.get('full_name'),
+                'biography': user.get('biography', ''),
+                'follower_count': user.get('edge_followed_by', {}).get('count', user.get('follower_count', 0)),
+                'following_count': user.get('edge_follow', {}).get('count', user.get('following_count', 0)),
+                'post_count': user.get('edge_owner_to_timeline_media', {}).get('count', user.get('media_count', 0)),
+                'is_verified': user.get('is_verified', False),
+                'is_private': user.get('is_private', False),
+                'profile_pic_url': user.get('profile_pic_url_hd') or user.get('hd_profile_pic_url_info', {}).get('url') or user.get('profile_pic_url'),
+                'external_url': user.get('external_url', ''),
+                'category': user.get('category', ''),
+            }
+            return {'profile': profile, 'user_id': str(user.get('id') or '')}
+        except Exception:
+            return None
+
+    def _fetch_profile_graphql(self, username: str) -> Optional[Dict[str, Any]]:
+        """Fetch profile using Instagram GraphQL (PolarisProfilePageContentQuery)."""
+        user_id = self._get_user_id(username)
+        if not user_id:
+            return None
+
+        variables = {
+            "enable_integrity_filters": True,
+            "id": user_id,
+            "render_surface": "PROFILE"
+        }
+
+        result = self._post_graphql(
+            doc_id=PROFILE_DOC_ID,
+            variables=variables,
+            friendly_name="PolarisProfilePageContentQuery",
+            root_field="fetch__XDTUserDict"
+        )
+        if not result:
+            return None
+
+        profile = self._parse_graphql_profile(result.get('data', {}))
+        if not profile:
+            return None
+        # Attach raw data to allow post extraction fallback
+        return {
+            'profile': profile,
+            'raw': result.get('data', {})
+        }
+
+    def _fetch_posts_graphql(self, username: str, limit: int) -> List[Dict[str, Any]]:
+        """Fetch posts grid via GraphQL (PolarisProfilePostsQuery)."""
+        variables = {
+            "data": {
+                "count": limit,
+                "include_reel_media_seen_timestamp": True,
+                "include_relationship_info": True,
+                "latest_besties_reel_media": True,
+                "latest_reel_media": True
+            },
+            "username": username,
+            "__relay_internal__pv__PolarisIsLoggedInrelayprovider": True
+        }
+
+        result = self._post_graphql(
+            doc_id=POSTS_DOC_ID,
+            variables=variables,
+            friendly_name="PolarisProfilePostsQuery",
+            root_field="xdt_api__v1__feed__user_timeline_graphql_connection"
+        )
+        if not result:
+            return []
+
+        data = result.get('data', {})
+        # Find the first connection that looks like the timeline
+        connection = None
+        for value in data.values():
+            if isinstance(value, dict) and 'edges' in value:
+                connection = value
+                break
+        if not connection:
+            return []
+
+        posts: List[Dict[str, Any]] = []
+        edges = connection.get('edges', [])
+        for edge in edges[:limit]:
+            node = edge.get('node', {})
+            posts.append({
+                'shortcode': node.get('code') or node.get('shortcode'),
+                'caption': self._get_caption(node),
+                'like_count': node.get('like_count') or node.get('edge_liked_by', {}).get('count', 0),
+                'comment_count': node.get('comment_count') or node.get('edge_media_to_comment', {}).get('count', 0),
+                'timestamp': node.get('taken_at') or node.get('taken_at_timestamp'),
+                'media_url': self._pick_media_url(node),
+                'is_video': node.get('is_video', False)
+            })
+        return posts
+
+    def _pick_media_url(self, node: Dict[str, Any]) -> Optional[str]:
+        """Choose a display URL from node candidates."""
+        if node.get('display_url'):
+            return node.get('display_url')
+        # Try image candidates
+        candidates = node.get('image_versions2', {}).get('candidates', [])
+        if candidates:
+            return candidates[0].get('url')
+        # Try video versions
+        videos = node.get('video_versions', [])
+        if videos:
+            return videos[0].get('url')
+        return None
 
     def search_users(self, query: str, limit: int = 20) -> List[Dict]:
         """Search for Instagram users using GraphQL API"""
@@ -130,6 +336,29 @@ class InstagramScraper:
         try:
             self._random_delay()
 
+            posts: List[Dict[str, Any]] = []
+
+            # Try web profile info API first (more stable than HTML)
+            api_profile = self._fetch_profile_api(username)
+            if api_profile:
+                if include_posts:
+                    posts = self._fetch_posts_graphql(username, post_limit)
+                return {'profile': api_profile['profile'], 'posts': posts}
+
+            # Preferred fallback: GraphQL profile fetch
+            graphql_profile = self._fetch_profile_graphql(username)
+
+            if include_posts and graphql_profile:
+                posts = self._fetch_posts_graphql(username, post_limit)
+
+            if graphql_profile:
+                result: Dict[str, Any] = {
+                    'profile': graphql_profile['profile'],
+                    'posts': posts,
+                }
+                return result
+
+            # Fallback: HTML parsing
             url = f"{self.base_url}/{username}/"
             headers = self.headers.copy()
             headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
@@ -284,6 +513,8 @@ class InstagramScraper:
     def _get_caption(self, node: Dict) -> str:
         """Extract caption from post node"""
         try:
+            if node.get('caption') and isinstance(node['caption'], dict):
+                return node['caption'].get('text', '') or ''
             edges = node.get('edge_media_to_caption', {}).get('edges', [])
             if edges:
                 return edges[0].get('node', {}).get('text', '')

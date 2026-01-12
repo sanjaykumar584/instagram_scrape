@@ -10,6 +10,7 @@
 6. [HTML Parsing for Profiles](#html-parsing-for-profiles)
 7. [Error Handling & Rate Limiting](#error-handling--rate-limiting)
 8. [Code Structure](#code-structure)
+9. [Production Hardening Plan](#production-hardening-plan)
 
 ---
 
@@ -738,3 +739,95 @@ print(cache.get("test_key"))
 6. **Authentication**: Support Instagram login for more data access
 7. **Proxy Support**: Route requests through proxies to avoid blocks
 8. **Webhook**: Push notifications when profiles are updated
+
+---
+
+## Production Hardening Plan
+
+### Key Risks Right Now
+
+- Silent failures: exceptions are swallowed in the scraper and return empty data with no visibility.
+- Rate limiting and blocks: fixed 1-3s delays with no detection of 429/403/401 or Retry-After guidance.
+- Session fragility: CSRF token and cookies are fetched once and never refreshed; expiry leads to steady failures.
+- Concurrency hazards: shared cache and session are not thread-safe; races under load can corrupt state.
+- Fragile parsing: hardcoded GraphQL doc_id/app_id and brittle HTML JSON extraction; minor Instagram changes break it.
+- No observability: no structured logs, metrics, or health checks beyond uptime.
+- Network resilience: no retries or backoff; timeouts surface as empty results.
+- Unbounded cache: in-memory dict has no limits or eviction; memory growth with unique queries.
+
+### What Will Break in Production
+
+- CSRF token expiration → every POST returns 401/403 and search becomes empty.
+- Instagram rate-limits or blocks the IP → scraper returns empty arrays; callers cannot tell block vs no results.
+- HTML layout change → profile parsing fails; API returns 404 “not found” even when the user exists.
+- Burst traffic → cache/session races, blocking I/O stalls the event loop, memory bloat from cache.
+- Network jitter/timeouts → requests fail with no retry; perceived as “no results”.
+
+### Hardening Steps (Suggested Order)
+
+1. **Logging and diagnostics**
+
+- Add structured logging (timestamp, request_id, path, status, elapsed_ms, error_kind) at entry/exit of search/profile.
+- Log non-200 responses from Instagram with status code and body snippet; log cache hits/misses and retries.
+
+2. **Error handling and response hygiene**
+
+- Differentiate client errors (400-range) vs server/transient (500/timeout) and map to meaningful API responses.
+- Return “upstream_unavailable” vs “not_found” vs “rate_limited”; avoid silent empty lists on errors.
+
+3. **Rate-limit detection and backoff**
+
+- Detect 429/403/401 and parse Retry-After; implement exponential backoff with jitter; add a circuit breaker to pause.
+- Serialize outbound requests with a token bucket or leaky bucket to keep RPS low and steady.
+
+4. **Session and CSRF management**
+
+- Refresh CSRF token and cookies when 401/403/400 occurs; add proactive refresh on a timer; isolate session per worker.
+- Persist cookie jar across restarts; clear and re-init on consecutive auth failures.
+
+5. **Thread-safe, bounded caching**
+
+- Replace dict cache with Redis or, at minimum, a thread-safe LRU with max size and TTL; guard mutations with a lock.
+- Cache negative lookups separately with short TTL to avoid hammering nonexistent users.
+
+6. **Network resilience**
+
+- Add retries with exponential backoff for connection/read timeouts and 5xx; separate connect_timeout vs read_timeout.
+- Configure HTTP connection pooling limits; surface retry counts in logs and metrics.
+
+7. **Parsing robustness and configurability**
+
+- Make doc_id/app_id configurable via environment; add fallback IDs and a health probe to verify they still work.
+- Validate response schema before parsing; if parsing fails, return a 502 with an explicit “parse_error” code and log a sample payload.
+
+8. **Observability and health**
+
+- Expose metrics: request counts, error counts by type, cache hit rate, Instagram status codes, latency percentiles, retry counts.
+- Add health checks that verify: can reach instagram.com, CSRF token is valid, search GraphQL responds with expected shape.
+
+9. **Scalability and isolation**
+
+- Make scraper I/O async or move to worker threads; ensure FastAPI handlers do not block the event loop.
+- Isolate per-request state; avoid global shared session unless protected; consider a small session pool.
+
+10. **Security and abuse controls**
+
+- Add API authentication (key or JWT) to your endpoints; rate-limit per caller; log caller identity in every request.
+
+### Minimal Viable Production Checklist
+
+- Structured logging + error codes in responses.
+- Retry with exponential backoff and block detection (429/403/401) plus a circuit breaker.
+- CSRF/cookie refresh on failure plus periodic refresh.
+- Redis (or thread-safe bounded cache) with TTL and max size.
+- Health check that exercises Instagram (lightweight ping plus schema check).
+- Metrics for requests, errors by type, latency, retries, cache hit rate, and Instagram status codes.
+- Configurable doc_id/app_id via environment with startup validation.
+- Input validation for q, username, and posts; sanitize and length-limit.
+
+### Stretch Improvements (Post-MVP)
+
+- Proxy rotation or IP pool to reduce block probability.
+- Separate search and profile workers with a queue to control outbound rate.
+- Persistent session store and scheduled token refresh job.
+- Feature flag for switching to GraphQL-based profile fetch when a stable doc_id is found.
