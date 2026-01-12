@@ -6,10 +6,18 @@ import random
 from typing import Optional, Dict, List, Any
 from bs4 import BeautifulSoup
 import os
+from logger_config import get_logger
+from rate_limiter import RateLimitTracker
+
+logger = get_logger("scraper")
 
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "10") or 10)
+CONNECT_TIMEOUT = int(os.getenv("CONNECT_TIMEOUT", "5") or 5)
+READ_TIMEOUT = int(os.getenv("READ_TIMEOUT", "10") or 10)
 MIN_DELAY = float(os.getenv("MIN_DELAY", "1") or 1)
 MAX_DELAY = float(os.getenv("MAX_DELAY", "3") or 3)
+MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3") or 3)
+RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "2") or 2)
 
 # GraphQL doc IDs are configurable so they can be rotated without code changes.
 PROFILE_DOC_ID = os.getenv("IG_PROFILE_DOC_ID", "25980296051578533")
@@ -23,6 +31,11 @@ BLOKS_VERSION_ID = os.getenv("IG_BLOKS_VERSION_ID", "41a4871badc8ef00114860033dd
 class InstagramScraper:
     def __init__(self):
         self.session = requests.Session()
+        # Set connection pooling for efficiency
+        adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10)
+        self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
+        
         self.base_url = "https://www.instagram.com"
         self.graphql_url = "https://www.instagram.com/graphql/query"
         self.headers = {
@@ -42,33 +55,51 @@ class InstagramScraper:
         self.app_id = IG_APP_ID  # Instagram web app ID (override via env)
         self.search_doc_id = SEARCH_DOC_ID  # GraphQL doc ID for search
         self.lsd_token: str = os.getenv("IG_LSD_TOKEN", "")
+        self.rate_limiter = RateLimitTracker()
         self._init_session()
 
     def _init_session(self):
         """Initialize session and get CSRF token"""
         try:
-            response = self.session.get(self.base_url, headers=self.headers, timeout=REQUEST_TIMEOUT)
+            logger.debug("Initializing session and fetching CSRF token")
+            response = self.session.get(self.base_url, headers=self.headers, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+            response.raise_for_status()
+            
             # Extract CSRF token from cookies
             self.csrf_token = response.cookies.get('csrftoken', '')
+            if self.csrf_token:
+                logger.debug(f"CSRF token from cookies: {self.csrf_token[:16]}...")
+            
             # Also extract from HTML if needed
             if not self.csrf_token:
                 m = re.search(r'"csrf_token":"([^"]+)"', response.text)
                 if m:
                     self.csrf_token = m.group(1)
-            # Try to capture LSD token from the bootstrap payload (used by IG GraphQL)
+                    logger.debug(f"CSRF token from HTML: {self.csrf_token[:16]}...")
+            
+            # Try to capture LSD token from the bootstrap payload
             if not self.lsd_token:
                 lsd_match = re.search(r'"LSD",\[\],\{"token":"([^"]+)"\}', response.text)
                 if lsd_match:
                     self.lsd_token = lsd_match.group(1)
-            # Store session ID and other important cookies
+                    logger.debug(f"LSD token captured: {self.lsd_token[:16]}...")
+            
+            # Store session cookies
             for cookie in response.cookies:
                 self.session.cookies.set_cookie(cookie)
-        except Exception:
+            
+            logger.info("Session initialized successfully")
+            self.rate_limiter.record_success()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Failed to initialize session: {e}")
             self.csrf_token = ''
+            self.rate_limiter.record_http_error(500)
 
     def _random_delay(self):
         """Add random delay to mimic human behavior"""
-        time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
+        delay = random.uniform(MIN_DELAY, MAX_DELAY)
+        logger.debug(f"Rate limiting delay: {delay:.2f}s")
+        time.sleep(delay)
 
     def _build_graphql_headers(self, friendly_name: Optional[str] = None, root_field: Optional[str] = None) -> Dict[str, str]:
         """Prepare headers for GraphQL calls."""
@@ -92,19 +123,83 @@ class InstagramScraper:
         return headers
 
     def _post_graphql(self, doc_id: str, variables: Dict[str, Any], friendly_name: Optional[str] = None, root_field: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Execute a GraphQL POST with shared headers and variables."""
-        try:
-            payload = {
-                'doc_id': doc_id,
-                'variables': json.dumps(variables)
-            }
-            headers = self._build_graphql_headers(friendly_name=friendly_name, root_field=root_field)
-            resp = self.session.post(self.graphql_url, headers=headers, data=payload, timeout=REQUEST_TIMEOUT)
-            if resp.status_code != 200:
-                return None
-            return resp.json()
-        except Exception:
+        """Execute a GraphQL POST with shared headers and variables and retry logic"""
+        # Check if rate limited
+        if self.rate_limiter.is_blocked():
+            wait = self.rate_limiter.get_wait_time()
+            logger.warning(f"Rate limited, request blocked for {wait:.1f}s more")
             return None
+        
+        for attempt in range(MAX_RETRIES):
+            try:
+                payload = {
+                    'doc_id': doc_id,
+                    'variables': json.dumps(variables)
+                }
+                headers = self._build_graphql_headers(friendly_name=friendly_name, root_field=root_field)
+                resp = self.session.post(self.graphql_url, headers=headers, data=payload, timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
+                
+                # Handle rate limit responses
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get('Retry-After')
+                    self.rate_limiter.record_rate_limit(int(retry_after) if retry_after else None)
+                    if attempt < MAX_RETRIES - 1:
+                        wait_time = (RETRY_BACKOFF_BASE ** attempt) + random.uniform(0, 1)
+                        logger.warning(f"GraphQL 429, retrying in {wait_time:.2f}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                        time.sleep(wait_time)
+                        continue
+                    return None
+                
+                # Handle auth errors
+                if resp.status_code in [401, 403]:
+                    logger.warning(f"GraphQL {resp.status_code}, refreshing session")
+                    self._init_session()
+                    self.rate_limiter.record_http_error(resp.status_code)
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(2 + random.uniform(0, 1))
+                        continue
+                    return None
+                
+                # Handle other errors
+                if resp.status_code >= 500:
+                    self.rate_limiter.record_http_error(resp.status_code)
+                    if attempt < MAX_RETRIES - 1:
+                        wait_time = (RETRY_BACKOFF_BASE ** attempt) + random.uniform(0, 1)
+                        logger.warning(f"GraphQL {resp.status_code}, retrying in {wait_time:.2f}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                        time.sleep(wait_time)
+                        continue
+                    return None
+                
+                if resp.status_code != 200:
+                    logger.warning(f"GraphQL unexpected status {resp.status_code}")
+                    return None
+                
+                result = resp.json()
+                self.rate_limiter.record_success()
+                logger.debug(f"GraphQL request succeeded for doc_id={doc_id}")
+                return result
+                
+            except requests.exceptions.Timeout:
+                logger.warning(f"GraphQL timeout on attempt {attempt + 1}/{MAX_RETRIES}")
+                self.rate_limiter.consecutive_failures += 1
+                if attempt < MAX_RETRIES - 1:
+                    wait_time = (RETRY_BACKOFF_BASE ** attempt) + random.uniform(0, 1)
+                    time.sleep(wait_time)
+                    continue
+                return None
+            except requests.exceptions.RequestException as e:
+                logger.error(f"GraphQL request error (attempt {attempt + 1}/{MAX_RETRIES}): {e}")
+                self.rate_limiter.consecutive_failures += 1
+                if attempt < MAX_RETRIES - 1:
+                    wait_time = (RETRY_BACKOFF_BASE ** attempt) + random.uniform(0, 1)
+                    time.sleep(wait_time)
+                    continue
+                return None
+            except json.JSONDecodeError as e:
+                logger.error(f"GraphQL JSON decode error: {e}")
+                return None
+        
+        return None
 
     def _get_user_id(self, username: str) -> Optional[str]:
         """Resolve username to user id using Instagram's web profile info endpoint."""
