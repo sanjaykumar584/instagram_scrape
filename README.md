@@ -1,6 +1,6 @@
 # Instagram Scraper API
 
-A lightweight FastAPI service that uses Instagram's GraphQL API to search users and fetch profiles. No database required, no login needed, all data fetched in real-time.
+A lightweight FastAPI service that uses Instagram's GraphQL API to search users and fetch profiles. No database required, no login needed, all data fetched in real-time. Includes an unofficial YouTube search helper that does not require an API key.
 
 ## Features
 
@@ -10,6 +10,7 @@ A lightweight FastAPI service that uses Instagram's GraphQL API to search users 
 - **Anti-Detection**: User-Agent rotation, header randomization, session refresh to avoid Instagram blocks
 - **Reliable**: Automatic session refresh every 50 requests or 30 minutes with fresh fingerprints
 - **No Authentication**: Works without Instagram login (public data only)
+- **YouTube helper**: Search videos/channels, fetch video or playlist details without an API key (unofficial)
 
 > **Note**: Accessing Instagram programmatically may violate their Terms of Service. Use responsibly for educational purposes only, with proper consent, and comply with all applicable laws and platform policies.
 
@@ -60,6 +61,13 @@ curl -s "http://localhost:8000/profile/cristiano" | jq .
 
 # Profile with 12 recent posts
 curl -s "http://localhost:8000/profile/cristiano?posts=12" | jq .
+
+# YouTube (unofficial, no API key)
+curl -s "http://localhost:8000/search/videos?q=python+tutorial&limit=5" | jq .
+curl -s "http://localhost:8000/search/shorts?q=python+tips&limit=5" | jq .
+curl -s "http://localhost:8000/video/dQw4w9WgXcQ" | jq .
+curl -s "http://localhost:8000/search/channels?q=mkbhd&limit=5" | jq .
+curl -s "http://localhost:8000/playlist/PL-osiE80TeTt2d9bfVyTiXJA-UTHn6WwU?limit=10" | jq .
 ```
 
 ## How It Works

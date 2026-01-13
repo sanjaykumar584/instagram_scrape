@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
 from scraper import InstagramScraper
+from youtube_client import YouTubeSearchClient
 import time
 import requests
 import uuid
@@ -11,6 +12,7 @@ logger = get_logger("api")
 
 app = FastAPI(title="Instagram Scraper API")
 scraper = InstagramScraper()
+yt_client = YouTubeSearchClient(cache_ttl=300)
 start_time = time.time()
 
 class ScraperError(Exception):
@@ -129,6 +131,114 @@ async def get_profile(
         logger.exception(f"[{request_id}] Unexpected error in profile: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+
+@app.get("/search/videos")
+async def search_videos(
+    q: str = Query(..., min_length=1, description="Search query"),
+    limit: int = Query(10, ge=1, le=50, description="Number of results"),
+):
+    """Search YouTube videos (unofficial)."""
+    request_id = str(uuid.uuid4())[:8]
+    logger.info(f"[{request_id}] YT SEARCH q={q}, limit={limit}")
+    try:
+        response = yt_client.search_videos(q, limit)
+        return JSONResponse(content=response)
+    except Exception as e:
+        logger.exception(f"[{request_id}] YouTube search error: {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+
+
+@app.get("/search/shorts")
+async def search_shorts(
+    q: str = Query(..., min_length=1, description="Search query"),
+    limit: int = Query(10, ge=1, le=50, description="Number of results"),
+):
+    """Search YouTube Shorts - short-form videos under 60 seconds (unofficial)."""
+    request_id = str(uuid.uuid4())[:8]
+    logger.info(f"[{request_id}] YT SHORTS q={q}, limit={limit}")
+    try:
+        response = yt_client.search_shorts(q, limit)
+        return JSONResponse(content=response)
+    except Exception as e:
+        logger.exception(f"[{request_id}] YouTube shorts search error: {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+
+
+@app.get("/video/{video_id}")
+async def get_video(video_id: str):
+    """Get detailed information about a specific YouTube video."""
+    request_id = str(uuid.uuid4())[:8]
+    logger.info(f"[{request_id}] YT VIDEO video_id={video_id}")
+    try:
+        response = yt_client.get_video(video_id)
+        return JSONResponse(content=response)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Video not found")
+    except Exception as e:
+        logger.exception(f"[{request_id}] YouTube video error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get video: {e}")
+
+
+@app.get("/search/channels")
+async def search_channels(
+    q: str = Query(..., min_length=1, description="Search query"),
+    limit: int = Query(10, ge=1, le=50, description="Number of results"),
+):
+    """Search YouTube channels (unofficial)."""
+    request_id = str(uuid.uuid4())[:8]
+    logger.info(f"[{request_id}] YT CHANNELS q={q}, limit={limit}")
+    try:
+        response = yt_client.search_channels(q, limit)
+        return JSONResponse(content=response)
+    except Exception as e:
+        logger.exception(f"[{request_id}] YouTube channel search error: {e}")
+        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+
+
+@app.get("/playlist/{playlist_id}")
+async def get_playlist(
+    playlist_id: str,
+    limit: int = Query(50, ge=1, le=100, description="Number of videos to fetch"),
+):
+    """Get videos from a YouTube playlist (unofficial)."""
+    request_id = str(uuid.uuid4())[:8]
+    logger.info(f"[{request_id}] YT PLAYLIST playlist_id={playlist_id}, limit={limit}")
+    try:
+        response = yt_client.get_playlist(playlist_id, limit)
+        return JSONResponse(content=response)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    except Exception as e:
+        logger.exception(f"[{request_id}] YouTube playlist error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to get playlist: {e}")
+
+
+@app.get("/channel/{channel_id}/videos")
+async def get_channel_videos(
+    channel_id: str,
+    limit: int = Query(10, ge=1, le=50, description="Number of videos"),
+):
+    """Placeholder guidance for fetching a channel's videos using search."""
+    request_id = str(uuid.uuid4())[:8]
+    logger.info(f"[{request_id}] YT CHANNEL VIDEOS channel_id={channel_id}, limit={limit}")
+    try:
+        response = yt_client.get_channel_videos_message(channel_id, limit)
+        return JSONResponse(content=response)
+    except Exception as e:
+        logger.exception(f"[{request_id}] YouTube channel videos error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed: {e}")
+
+
+@app.get("/trending")
+async def get_trending(region: str = Query("US", description="Country code (US, IN, GB, etc.)")):
+    """Placeholder endpoint for trending videos."""
+    return JSONResponse(content={
+        "success": False,
+        "message": "Trending videos require official YouTube API or web scraping",
+        "suggestion": "Use search with popular terms or specific channels",
+        "region": region,
+    })
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint with Instagram connectivity test"""
@@ -157,6 +267,9 @@ async def health_check():
         
         if scraper.rate_limiter.is_blocked():
             health_data["rate_limit_wait_seconds"] = scraper.rate_limiter.get_wait_time()
+
+        # YouTube subsystem health (best effort)
+        health_data["youtube_cache_items"] = yt_client.cache_size()
         
         return health_data
         
